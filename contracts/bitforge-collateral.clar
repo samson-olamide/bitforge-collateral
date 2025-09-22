@@ -155,3 +155,196 @@
     (ok vault-id)
   )
 )
+
+(define-public (mint-stablecoin 
+  (vault-owner principal)
+  (vault-id uint)
+  (mint-amount uint)
+)
+  (let
+    (
+      (is-valid-vault-id 
+        (and 
+          (> vault-id u0)
+          (<= vault-id (var-get vault-counter))
+        )
+      )
+      (vault 
+        (unwrap! 
+          (map-get? vaults {owner: vault-owner, id: vault-id}) 
+          ERR-INVALID-PARAMETERS
+        )
+      )
+      (btc-price 
+        (unwrap! 
+          (get-latest-btc-price) 
+          ERR-ORACLE-PRICE-UNAVAILABLE
+        )
+      )
+      (max-mintable 
+        (/
+          (* 
+            (get collateral-amount vault) 
+            btc-price
+          ) 
+          (var-get collateralization-ratio)
+        )
+      )
+    )
+    (asserts! is-valid-vault-id ERR-INVALID-PARAMETERS)
+    (asserts! (is-eq tx-sender vault-owner) ERR-UNAUTHORIZED-VAULT-ACTION)
+    (asserts! (> mint-amount u0) ERR-INVALID-PARAMETERS)
+    (asserts! 
+      (>= 
+        max-mintable 
+        (+ (get stablecoin-minted vault) mint-amount)
+      ) 
+      ERR-UNDERCOLLATERALIZED
+    )
+    (asserts! 
+      (<= 
+        (+ (get stablecoin-minted vault) mint-amount) 
+        (var-get max-mint-limit)
+      ) 
+      ERR-MINT-LIMIT-EXCEEDED
+    )
+    (map-set vaults {owner: vault-owner, id: vault-id}
+      {
+        collateral-amount: (get collateral-amount vault),
+        stablecoin-minted: (+ (get stablecoin-minted vault) mint-amount),
+        created-at: (get created-at vault)
+      }
+    )
+    (var-set total-supply 
+      (+ (var-get total-supply) mint-amount)
+    )
+    (ok true)
+  )
+)
+
+;; RISK MANAGEMENT FUNCTIONS
+
+(define-public (liquidate-vault 
+  (vault-owner principal)
+  (vault-id uint)
+)
+  (let
+    (
+      (is-valid-vault-id 
+        (and 
+          (> vault-id u0)
+          (<= vault-id (var-get vault-counter))
+        )
+      )
+      (vault 
+        (unwrap! 
+          (map-get? vaults {owner: vault-owner, id: vault-id}) 
+          ERR-INVALID-PARAMETERS
+        )
+      )
+      (btc-price 
+        (unwrap! 
+          (get-latest-btc-price) 
+          ERR-ORACLE-PRICE-UNAVAILABLE
+        )
+      )
+      (current-collateralization 
+        (/
+          (* 
+            (get collateral-amount vault) 
+            btc-price
+          ) 
+          (get stablecoin-minted vault)
+        )
+      )
+    )
+    (asserts! is-valid-vault-id ERR-INVALID-PARAMETERS)
+    (asserts! (not (is-eq tx-sender vault-owner)) ERR-UNAUTHORIZED-VAULT-ACTION)
+    (asserts! 
+      (< current-collateralization (var-get liquidation-threshold)) 
+      ERR-LIQUIDATION-FAILED
+    )
+    (var-set total-supply 
+      (- (var-get total-supply) (get stablecoin-minted vault))
+    )
+    (map-delete vaults {owner: vault-owner, id: vault-id})
+    (ok true)
+  )
+)
+
+(define-public (redeem-stablecoin 
+  (vault-owner principal)
+  (vault-id uint)
+  (redeem-amount uint)
+)
+  (let
+    (
+      (is-valid-vault-id 
+        (and 
+          (> vault-id u0)
+          (<= vault-id (var-get vault-counter))
+        )
+      )
+      (vault 
+        (unwrap! 
+          (map-get? vaults {owner: vault-owner, id: vault-id}) 
+          ERR-INVALID-PARAMETERS
+        )
+      )
+    )
+    (asserts! is-valid-vault-id ERR-INVALID-PARAMETERS)
+    (asserts! (is-eq tx-sender vault-owner) ERR-UNAUTHORIZED-VAULT-ACTION)
+    (asserts! (> redeem-amount u0) ERR-INVALID-PARAMETERS)
+    (asserts! 
+      (<= redeem-amount (get stablecoin-minted vault)) 
+      ERR-INSUFFICIENT-BALANCE
+    )
+    (map-set vaults {owner: vault-owner, id: vault-id}
+      {
+        collateral-amount: (get collateral-amount vault),
+        stablecoin-minted: (- (get stablecoin-minted vault) redeem-amount),
+        created-at: (get created-at vault)
+      }
+    )
+    (var-set total-supply 
+      (- (var-get total-supply) redeem-amount)
+    )
+    (ok true)
+  )
+)
+
+;; GOVERNANCE FUNCTIONS
+
+(define-public (update-collateralization-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! 
+      (and 
+        (>= new-ratio u100)
+        (<= new-ratio u300)
+      ) 
+      ERR-INVALID-PARAMETERS
+    )
+    (var-set collateralization-ratio new-ratio)
+    (ok true)
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-latest-btc-price)
+  (map-get? last-btc-price 
+    {
+      timestamp: stacks-block-height,
+      price: u0
+    }
+  )
+)
+
+(define-read-only (get-vault-details (vault-owner principal) (vault-id uint))
+  (map-get? vaults {owner: vault-owner, id: vault-id})
+)
+
+(define-read-only (get-total-supply)
+  (var-get total-supply)
+)
